@@ -4,6 +4,7 @@ import os, inspect, sys
 import random
 import pandas as pd
 from time import sleep
+from datetime import datetime
 
 # Helper function needed by get_loan_data
 def extract_loan_details(loan_dict):
@@ -43,26 +44,53 @@ def extract_meta_data(loan_dict):
     return loan_dict
 
 
-# Get a dict of loan data for a loan_address
+# Helper function for get_all_loans(): Get a dict of loan data for a loan_address
 def get_loan_data(loan_address):
-    '''Returns a dictionary of loan data.'''
+    '''Takes a loan address and returns a dictionary of loan data.'''
     d = {}
+    
     # Instantiate contract to make it callable
     loan = eth.contract(address=loan_address, abi=ABI_LOAN)
     caller = loan.caller()
+    
+    # Get data
     d['collateral_balance'] = caller.getCollateralBalance()
     d['loan_details'] = caller.getLoanDetails()
     d['meta_data'] = caller.getLoanMetadata()
     d['ts_due'] = caller.getTimestampDue()
     d['is_defaulted'] = caller.isDefaulted()
-        
+    
+    # Extract nested data
     d = extract_loan_details(d)
     d = extract_meta_data(d)
 
     return d
 
 
-# Appends a new row to csv as specified in fileName
+# Returns set of all loans ever taken out on yield.credit
+def get_all_loans(logfile=None):
+    '''
+    Queries yield.credit's loan factory and returns set of all loans ever taken out.
+    '''
+    funcName = inspect.currentframe().f_code.co_name
+    
+    # Instantiate contract as contract object
+    contract = eth.contract(address=loan_fac, abi=ABI_LOAN_FAC)
+
+    # Query contract to get loan addresses
+    try:
+        loans = set(contract.caller.getLoans())
+    except:
+        message = f'{funcName}(): Couldn\'t get loans today. :('
+        print(message)
+        
+        if logfile:
+            log(logfile, message)
+
+    return loans
+
+
+# Helper function for appendToCsv(): Appends a new row to csv as specified in fileName
 def appendToCsv(fileName, varList, varNames, verbose=True):
     '''
     Appends each value in varList as a new row to a file as specified in fileName.
@@ -170,11 +198,11 @@ def updateCSV(d, fileName, order=None, verbose=True, logfile=None):
         rowsBefore = 0
     
     # Append data
-    for pair in outDf:
-        name = pair
-        varNames = outDf[pair].index.tolist()
-        varNames.insert(0, 'token')
-        varList = outDf[pair].values.tolist()
+    for loan in outDf:
+        name = loan
+        varNames = outDf[loan].index.tolist()
+        varNames.insert(0, 'loan_address')
+        varList = outDf[loan].values.tolist()
         varList.insert(0, name)
         appendToCsv(fileName, varList, varNames, verbose=verbose)
         
@@ -189,12 +217,12 @@ def updateCSV(d, fileName, order=None, verbose=True, logfile=None):
         
     printDf = pd.DataFrame(sampleList, index=headerList, columns=['Sample Row'])
     
-    print(f'Appended {difference} rows to {fileName}.\nRandom sample:\n')
+    print(f'Appended {difference} fresh loans to {fileName}.\nRandom sample:\n')
     print(printDf)
     
     # Option: Write summary to logfile
     if logfile:
-        log(logfile, f'Appended {difference} rows to {fileName}.')
+        log(logfile, f'Appended {difference} fresh loans to {fileName}.')
 
         
 # Appends a row (datetime + log message) to a logfile.
