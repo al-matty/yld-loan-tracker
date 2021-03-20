@@ -3,8 +3,11 @@
 import os, inspect, sys
 import random
 import pandas as pd
+import urllib.request
+from bs4 import BeautifulSoup
 from time import sleep
 from datetime import datetime
+
 
 # Helper function needed by get_loan_data
 def extract_loan_details(loan_dict):
@@ -67,7 +70,7 @@ def get_loan_data(loan_address):
     return d
 
 
-# Returns set of all loans ever taken out on yield.credit
+# Returns set of addresses for all loans ever taken out on yield.credit
 def get_all_loans(logfile=None):
     '''
     Queries yield.credit's loan factory and returns set of all loans ever taken out.
@@ -177,7 +180,7 @@ def appendToCsv(fileName, varList, varNames, verbose=True):
 
                 
 # Calls appendToCsv(). Values in d (nested dict) per pool/token become veriables per row in csv
-def updateCSV(d, fileName, order=None, verbose=True, logfile=None):
+def updateCSV(d, fileName, order=None, verbose=True, logfile=None, sample=True):
     '''
     Appends current pool data from nested dict to csv file to keep track of
     asset ratios over time.
@@ -214,11 +217,12 @@ def updateCSV(d, fileName, order=None, verbose=True, logfile=None):
         headerList = lines[0].strip().split(',')
         sampleRow = random.choice(lines[-difference:])
         sampleList = sampleRow.strip().split(',')
-        
-    printDf = pd.DataFrame(sampleList, index=headerList, columns=['Sample Row'])
     
-    print(f'Appended {difference} fresh loans to {fileName}.\nRandom sample:\n')
-    print(printDf)
+    if sample:
+        printDf = pd.DataFrame(sampleList, index=headerList, columns=['Sample Row'])
+        print(f'Appended {difference} fresh loans to {fileName}.')
+        print('.\nRandom sample:\n')
+        print(printDf)
     
     # Option: Write summary to logfile
     if logfile:
@@ -233,8 +237,172 @@ def log(logfile, _str):
     # Get current time.
     timestamp = datetime.now()
     parsedTime = timestamp.strftime('%Y %b %d %H:%M')
-    
+
     row = '\n' + parsedTime + '\t' + _str
+    
+    # Avoid skipping the first line if no logfile exists yet
+    if not os.path.isfile(logfile):
+        row = row[1:]
     
     with open(logfile, 'a') as file:
         file.write(row)
+
+        
+
+# Helper function for Scrapes and returns price of 1 asset from coingecko
+def get_token_price(token_str):
+    '''
+    Assumes a string matching an existing html child of 'coingecko.com/en/coins/', i.e. 'ethereum'.
+    Returns float of current asset price (USD) as given on coingecko.com.
+    '''
+    url = 'https://www.coingecko.com/en/coins/' + token_str
+    userAgent = 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko)' + \
+        ' Chrome/41.0.2228.0 Safari/537.36'
+    req = urllib.request.Request(url, headers= {'User-Agent' : userAgent})
+    html = urllib.request.urlopen(req)
+    bs = BeautifulSoup(html.read(), 'html.parser')
+    
+    # Scrape price data
+    varList = bs.findAll('span', {'class': 'no-wrap'})  
+    priceStr = varList[0].get_text()
+    price_usd = float(priceStr.replace(',','').replace('$',''))
+    
+    # Sleep max 2 seconds before function can be called again
+    sleep(random.random()*2)
+    
+    return price_usd
+
+
+# Helper function for get_token_metrics. Needed for market cap rank.
+def findCell(tableRows, rowKw, cellKw=None, getRawRow=False, stripToInt=True):
+    '''
+    Assumes tableRows = bs.findAll('tr').
+    Cycles through all table rows / cells of a website and returns a match
+    
+    If no cellKw set:    Returns 1st matching row. 
+    If cellKw set:       Returns first matching cell within that row.
+    If stripToInt:       Returns int (all numbers within that cell).
+    
+    Example:
+                >>>findCell(tableRows, 'Price', '$')
+                >>>575
+    '''
+    funcName = inspect.currentframe().f_code.co_name
+    result = None
+
+    for row in tableRows:
+        
+        # Possibility no cellKw: Return the first row containing rowKw
+        if rowKw in row.get_text():
+            result = str(row)
+            
+            # Possibility getRaw: Return raw bs.Tag object
+            if getRawRow and result and not cellKw:
+                result = row
+                stripToInt = False
+            
+    # Possibility cellKw: Return the first cell containing cellKw
+    if cellKw and result:
+        sCell = [str(cell) for cell in row if cellKw in result][0]
+        result = sCell
+                
+    # Possibility stripToInt: Extract integers and return int
+    if stripToInt and result:
+        try:
+            n = int(''.join(filter(lambda i: i.isdigit(), result)))
+            result = n
+        except ValueError:
+            print( \
+            f'''
+            {funcName}():
+            There are no digits in the first row containing '{rowKw}' and
+            its first cell containing '{cellKw}'.
+            ''')
+    
+    # Possibility: No rows found matching rowKw
+    if not result:
+        print(f'{funcName}(): No rows found containing {rowKw}!')
+    return result    
+
+
+# Scrapes coingecko and returns dict of various token metrics for 1 asset (calls findCell() for mc rank)
+def get_token_metrics(token_str, logfile=None, waitAfter=3):
+    '''
+    Assumes a string matching an existing html child of 'coingecko.com/en/coins/', i.e. 'ethereum'.
+    Returns a dict of current asset metrics as given on coingecko.com.
+    '''
+    
+    # Get name of function for error messages (depends on inspect, sys)
+    funcName = inspect.currentframe().f_code.co_name
+    tokenDict = {}
+    
+    # Scrape coingecko content for given token
+    url = 'https://www.coingecko.com/en/coins/' + tokenStr
+    userAgent = 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko)' + \
+        ' Chrome/41.0.2228.0 Safari/537.36'
+    req = urllib.request.Request(url, headers= {'User-Agent' : userAgent})
+    html = urllib.request.urlopen(req)
+    bs = BeautifulSoup(html.read(), 'html.parser')
+    
+    # Load necessary html tag result sets
+    noWrapTags = bs.findAll('span', {'class': 'no-wrap'})  # list of html tags
+    mt1Tags = bs.findAll('div', {'class': 'mt-1'}) 
+    tableRows = bs.findAll('tr')
+
+    # Extract metrics that need html tag key attribute or other special treatment
+    try:
+        manuallyScraped = ['priceBTC', 'mcBTC']
+        priceBTC = float(noWrapTags[0].get('data-price-btc'))
+        mcBTC = float(noWrapTags[1].get('data-price-btc'))
+        circSupply = float(mt1Tags[6].get_text().split('/')[0].strip().replace(',',''))
+        mcRank = findCell(tableRows, 'Rank', stripToInt=True)
+
+        # If supply is infinite (as in ETH), replace with inf
+        try:
+            totalSupply = float(mt1Tags[6].get_text().split('/')[1].strip().replace(',',''))
+        except ValueError:
+            totalSupply = np.inf
+        
+    # Possibility: str-to-float conversion failed because it got None as argument 
+    except TypeError:
+        print(f"""
+            Coingecko seems to have restructured their website.
+            One of these metrics couldn't be scraped:
+            {manuallyScraped}
+            Check {funcName}().
+            """)
+    
+    # Extract all other metrics from text and add all to the dict
+    tokenDict['priceUSD'] = clean(noWrapTags[0].get_text())
+    tokenDict['priceBTC'] = priceBTC
+    tokenDict['mcRank'] = mcRank
+    tokenDict['mcUSD'] = clean(noWrapTags[1].get_text())
+    tokenDict['mcBTC'] = mcBTC
+    tokenDict['circSupply'] = circSupply
+    tokenDict['totalSupply'] = totalSupply
+    tokenDict['24hVol'] = clean(noWrapTags[2].get_text())
+    tokenDict['24hLow'] = clean(noWrapTags[3].get_text())
+    tokenDict['24hHigh'] = clean(noWrapTags[4].get_text())
+    tokenDict['7dLow'] = clean(noWrapTags[10].get_text())
+    tokenDict['7dHigh'] = clean(noWrapTags[11].get_text())
+    tokenDict['ATH'] = clean(noWrapTags[12].get_text())
+    tokenDict['ATL'] = clean(noWrapTags[13].get_text())
+    tokenDict['symbol'] = noWrapTags[0].get('data-coin-symbol')
+    
+    # Option: Write to logFile if any scraped metric except 'symbol' is not a number
+    if logfile:
+        allowedTypes = {int, float}
+        filtered = {key: value for (key, value) in tokenDict.items() if key != 'symbol'}
+        
+        for key, metric in filtered.items():
+            if type(metric) not in allowedTypes:
+                message = f"Check {funcName}(): Scraped value for '{tokenStr}': '{key}' is '{metric}', which is not a number."
+                log(logfile, message)
+    
+    # Wait for max {waitAfter} seconds before function can be called again (= scrape in a nice way)
+    sleep(random.random() * waitAfter)
+    
+    return tokenDict
+
+   
+        
