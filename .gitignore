@@ -1,3 +1,12 @@
+# Additions by the author
+job.sh
+yield_logging.txt
+*stderr*
+*stdout*
+*.log
+*.csv
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

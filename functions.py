@@ -1,5 +1,3 @@
-# Helper Functions
-
 import os, inspect, sys
 import random
 import pandas as pd
@@ -8,13 +6,115 @@ from bs4 import BeautifulSoup
 from time import sleep
 from datetime import datetime
 
+from etherscan import Etherscan
+from web3.auto.infura import w3
 
-# Helper function needed by get_loan_data
+logfile = 'yield_logging.txt'
+
+#############################################################################
+#
+#   Initialize connection to Ethereum network
+#
+#############################################################################
+
+
+# Initialize Etherscan API
+API_KEY = os.environ['ETHERSCAN_API_KEY']
+etherscan = Etherscan(API_KEY)
+
+# Connect to ETH Node (Infura)
+eth = w3.eth
+
+# Contract addresses
+loan_address = '0xbFE28f2d7ade88008af64764eA16053F705CF1f0'
+loan_fac_address = '0x49aF18b1ecA40Ef89cE7F605638cF675B70012A7'
+
+# TOKEN_METRICS_TODAY <- gets filled by update_daily_metrics()
+TOKEN_METRICS_TODAY = {}
+
+
+#############################################################################
+#
+# Helper functions & global variables
+#   globals():
+#   ABI_LOAN_FAC    Abi for smart contract LoanFactory.sol
+#   ABI_LOAN        Abi for smart contract Loan.sol
+#   LOAN_FAC        Instantiated & queryable smart contract LoanFactory.sol
+#   ALL_LOANS_DATA  dict of dicts: {loan_address_i: {metric_j: val_j, ...}}
+#
+#############################################################################
+
+# Query Etherscan API to get ABI for of contract address
+def get_abi(address):
+    abi = etherscan.get_contract_abi(address)
+    return abi
+
+def instantiate_contract(address, abi):
+    contract = eth.contract(address=address, abi=abi)
+    return contract
+
+ABI_LOAN_FAC = get_abi(loan_fac_address)
+ABI_LOAN = get_abi(loan_address)
+
+
+
+# Appends a row (datetime + log message) to a logfile.
+def log(logfile, _str):
+    '''
+    Appends current date, time, and _str as row to logfile (i.e. logging.txt).
+    '''
+    # Get current time.
+    timestamp = datetime.now()
+    parsedTime = timestamp.strftime('%Y %b %d %H:%M')
+    row = '\n' + parsedTime + '\t' + _str
+
+    # Avoid skipping the first line if no logfile exists yet
+    if not os.path.isfile(logfile):
+        row = row[1:]
+
+    # Write to file
+    with open(logfile, 'a') as file:
+        file.write(row)
+
+
+
+# ALL_LOANS <- addresses of all loans ever taken out
+LOAN_FAC = instantiate_contract(loan_fac_address, ABI_LOAN_FAC)
+
+try:
+    ALL_LOANS = set(LOAN_FAC.caller.getLoans())
+except:
+    message = "Couldn't query LoanFactory.sol. Aborted data collection."
+    print(message)
+    log(logfile, message)
+
+
+
+
+# Helper function: Takes token address and returns symbol as specified in token_map
+def get_token_symbol(token_address):
+    try:
+        return loken_map[token_address]['symbol']
+    except KeyError:
+        print(
+            f'''
+            Couldn't find a symbol for token {token_address} in token_map.
+            Maybe it's only supported since today? I returned its address instead.
+            ''')
+        return token_address
+
+
+# Helper function: Takes token address, returns coingecko location for scraping
+def get_token_str(token_address):
+    return token_map[token_address]['coingecko_str']
+
+
+# Helper function needed by get_loan_data()
 def extract_loan_details(loan_dict):
     '''Splits up 'loan_details' into single entries, deletes original.'''
 
     details = loan_dict['loan_details']
-    
+
     # Add keys and values to dict
     loan_dict['address_lender'] = details[0]
     loan_dict['address_borrower'] = details[1]
@@ -24,24 +124,24 @@ def extract_loan_details(loan_dict):
     loan_dict['interest'] = details[5]
     loan_dict['duration'] = details[6]
     loan_dict['collateral'] = details[7]
-    
+
     # Remove original entry
     del loan_dict['loan_details']
     return loan_dict
 
 
-# Helper function needed by get_loan_data
+# Helper function needed by get_loan_data()
 def extract_meta_data(loan_dict):
     '''Splits up 'meta_data' into single entries, deletes original.'''
 
     meta = loan_dict['meta_data']
-    
+
     # Add keys and values to dict
     loan_dict['loan_status'] = meta[0]
     loan_dict['ts_start'] = meta[1]
     loan_dict['ts_repaid'] = meta[2]
     loan_dict['liquidatable_t_allowance'] = meta[3]
-    
+
     # Remove original entry
     del loan_dict['meta_data']
     return loan_dict
@@ -50,48 +150,27 @@ def extract_meta_data(loan_dict):
 # Helper function for get_all_loans(): Get a dict of loan data for a loan_address
 def get_loan_data(loan_address):
     '''Takes a loan address and returns a dictionary of loan data.'''
+    global ABI_LOAN
+
     d = {}
-    
     # Instantiate contract to make it callable
     loan = eth.contract(address=loan_address, abi=ABI_LOAN)
     caller = loan.caller()
-    
+
     # Get data
     d['collateral_balance'] = caller.getCollateralBalance()
     d['loan_details'] = caller.getLoanDetails()
     d['meta_data'] = caller.getLoanMetadata()
     d['ts_due'] = caller.getTimestampDue()
     d['is_defaulted'] = caller.isDefaulted()
-    
+
     # Extract nested data
     d = extract_loan_details(d)
     d = extract_meta_data(d)
 
     return d
 
-
-# Returns set of addresses for all loans ever taken out on yield.credit
-def get_all_loans(logfile=None):
-    '''
-    Queries yield.credit's loan factory and returns set of all loans ever taken out.
-    '''
-    funcName = inspect.currentframe().f_code.co_name
-    
-    # Instantiate contract as contract object
-    contract = eth.contract(address=loan_fac, abi=ABI_LOAN_FAC)
-
-    # Query contract to get loan addresses
-    try:
-        loans = set(contract.caller.getLoans())
-    except:
-        message = f'{funcName}(): Couldn\'t get loans today. :('
-        print(message)
-        
-        if logfile:
-            log(logfile, message)
-
-    return loans
-
+ALL_LOANS_DATA = {loan: get_loan_data(loan) for loan in ALL_LOANS}
 
 # Helper function for appendToCsv(): Appends a new row to csv as specified in fileName
 def appendToCsv(fileName, varList, varNames, verbose=True):
@@ -99,24 +178,24 @@ def appendToCsv(fileName, varList, varNames, verbose=True):
     Appends each value in varList as a new row to a file as specified in fileName.
     Creates new file with header if not found in working dir.
     Aborts with error message if it would change shape[1] of csv (= number of vars per row).
-    
+
     Format of header:    id,time,[varNames]
     Example for row:     0,2021 Feb 18 16:24,0.03,72,NaN,Yes,...
-    
+
     1st value: Successive id (=first value in last row of file + 1).
     2nd value: The current time in format "2021 Feb 18 17:34"
     If there is no file yet: Creates file with header = id, timestamp, [varNames]
     '''
-    
+
     # Get name of function for error messages (depends on inspect, sys)
     funcName = inspect.currentframe().f_code.co_name
-    
+
     # Abort if number of variables and names don't add up.
     assert len(varList) == len(varNames), \
         f"{funcName}(): The number of variables and names to append to csv must be the same."
-    
+
     rowsAdded = []
-    
+
     # Get current time.
     timestamp = datetime.now()
     parsedTime = timestamp.strftime('%Y %b %d %H:%M')
@@ -124,14 +203,14 @@ def appendToCsv(fileName, varList, varNames, verbose=True):
     # Possibility: fileName doesn't exist yet. Create file with header and data.
     if not os.path.isfile(fileName):
         header = 'id,' + 'time,' + str(','.join(varNames))
-        
+
         with open(fileName, 'a') as wfile:
             wfile.write(header)
             varList = [str(var) for var in varList]
             row = '\n' + '0' + ',' + parsedTime + ',' + str(','.join(varList))
             wfile.write(row)
             rowsAdded.append(row)
-            
+
         if verbose:
             print(
             '''
@@ -139,23 +218,23 @@ def appendToCsv(fileName, varList, varNames, verbose=True):
             Header:
             %s
             ''' % (fileName, header))
-            print('Added new row to data: \t', row[1:]) 
+            print('Added new row to data: \t', row[1:])
 
     # Possibility: fileName exists. Only append new data.
     else:
-        
+
         # Abort if number of variables to append differs from number of elements in csv header.
         with open(fileName, 'r') as infile:
             header = infile.readlines()[0]
             n_header = len(header.split(','))
-            
+
         assert len(varList) + 2 == n_header, \
             f"""
             {funcName}(): You're trying to append a row of {len(varList)} variables to csv.
             In the csv header there are {n_header}. To be imported as pandas dataframe for analytics,
             the number of variables per row in the csv needs to stay consistent throughout all rows.
             """
-        
+
         # Determine new id value based on most recent line of file.
         with open(fileName, 'r') as rfile:
             rows = rfile.readlines()
@@ -167,9 +246,9 @@ def appendToCsv(fileName, varList, varNames, verbose=True):
                     row = '\n' + str(id_) + ',' + parsedTime + ',' + str(','.join(varList))
                     wfile.write(row)
                     rowsAdded.append(row)
-                    
+
                     if verbose:
-                        print('Added new row to data: \t', row[1:]) 
+                        print('Added new row to data: \t', row[1:])
 
             # Possibility: id can't be determined from file. Abort.
             except ValueError:
@@ -178,7 +257,7 @@ def appendToCsv(fileName, varList, varNames, verbose=True):
                 Something is wrong with your data file.
                 No data has been written to the file.''' % fileName)
 
-                
+
 # Calls appendToCsv(). Values in d (nested dict) per pool/token become veriables per row in csv
 def updateCSV(d, fileName, order=None, verbose=True, logfile=None, sample=True):
     '''
@@ -192,14 +271,14 @@ def updateCSV(d, fileName, order=None, verbose=True, logfile=None, sample=True):
     # Possibility: Reorder data as specified in order
     if order:
         outDf = outDf.reindex(order)
-        
+
     # Count rows before appending data
     if os.path.isfile(fileName):
         with open(fileName, 'r') as file:
             rowsBefore = len(file.readlines())
     else:
         rowsBefore = 0
-    
+
     # Append data
     for loan in outDf:
         name = loan
@@ -208,7 +287,7 @@ def updateCSV(d, fileName, order=None, verbose=True, logfile=None, sample=True):
         varList = outDf[loan].values.tolist()
         varList.insert(0, name)
         appendToCsv(fileName, varList, varNames, verbose=verbose)
-        
+
     # Count rows after appending, prepare labeled sample row for printing
     with open(fileName, 'r') as file:
         lines = file.readlines()
@@ -217,35 +296,16 @@ def updateCSV(d, fileName, order=None, verbose=True, logfile=None, sample=True):
         headerList = lines[0].strip().split(',')
         sampleRow = random.choice(lines[-difference:])
         sampleList = sampleRow.strip().split(',')
-    
+
     if sample:
         printDf = pd.DataFrame(sampleList, index=headerList, columns=['Sample Row'])
         print(f'Appended {difference} fresh loans to {fileName}.')
         print('.\nRandom sample:\n')
         print(printDf)
-    
+
     # Option: Write summary to logfile
     if logfile:
         log(logfile, f'Appended {difference} fresh loans to {fileName}.')
-
-        
-# Appends a row (datetime + log message) to a logfile.
-def log(logfile, _str):
-    '''
-    Appends current date, time, and _str as row to logfile (i.e. logging.txt).
-    '''
-    # Get current time.
-    timestamp = datetime.now()
-    parsedTime = timestamp.strftime('%Y %b %d %H:%M')
-
-    row = '\n' + parsedTime + '\t' + _str
-    
-    # Avoid skipping the first line if no logfile exists yet
-    if not os.path.isfile(logfile):
-        row = row[1:]
-    
-    with open(logfile, 'a') as file:
-        file.write(row)
 
 
 # Helper function for Scrapes and returns price of 1 asset from coingecko
@@ -260,15 +320,15 @@ def get_token_price(token_str):
     req = urllib.request.Request(url, headers= {'User-Agent' : userAgent})
     html = urllib.request.urlopen(req)
     bs = BeautifulSoup(html.read(), 'html.parser')
-    
+
     # Scrape price data
-    varList = bs.findAll('span', {'class': 'no-wrap'})  
+    varList = bs.findAll('span', {'class': 'no-wrap'})
     priceStr = varList[0].get_text()
     price_usd = float(priceStr.replace(',','').replace('$',''))
-    
+
     # Sleep max 2 seconds before function can be called again
     sleep(random.random()*2)
-    
+
     return price_usd
 
 
@@ -277,11 +337,11 @@ def findCell(tableRows, rowKw, cellKw=None, getRawRow=False, stripToInt=True):
     '''
     Assumes tableRows = bs.findAll('tr').
     Cycles through all table rows / cells of a website and returns a match
-    
-    If no cellKw set:    Returns 1st matching row. 
+
+    If no cellKw set:    Returns 1st matching row.
     If cellKw set:       Returns first matching cell within that row.
     If stripToInt:       Returns int (all numbers within that cell).
-    
+
     Example:
                 >>>findCell(tableRows, 'Price', '$')
                 >>>575
@@ -290,21 +350,21 @@ def findCell(tableRows, rowKw, cellKw=None, getRawRow=False, stripToInt=True):
     result = None
 
     for row in tableRows:
-        
+
         # Possibility no cellKw: Return the first row containing rowKw
         if rowKw in row.get_text():
             result = str(row)
-            
+
             # Possibility getRaw: Return raw bs.Tag object
             if getRawRow and result and not cellKw:
                 result = row
                 stripToInt = False
-            
+
     # Possibility cellKw: Return the first cell containing cellKw
     if cellKw and result:
         sCell = [str(cell) for cell in row if cellKw in result][0]
         result = sCell
-                
+
     # Possibility stripToInt: Extract integers and return int
     if stripToInt and result:
         try:
@@ -317,11 +377,11 @@ def findCell(tableRows, rowKw, cellKw=None, getRawRow=False, stripToInt=True):
             There are no digits in the first row containing '{rowKw}' and
             its first cell containing '{cellKw}'.
             ''')
-    
+
     # Possibility: No rows found matching rowKw
     if not result:
         print(f'{funcName}(): No rows found containing {rowKw}!')
-    return result    
+    return result
 
 
 # Scrapes coingecko and returns dict of various token metrics for 1 asset (calls findCell() for mc rank)
@@ -330,11 +390,11 @@ def get_token_metrics(token_str, logfile=None, waitAfter=3):
     Assumes a string matching an existing html child of 'coingecko.com/en/coins/', i.e. 'ethereum'.
     Returns a dict of current asset metrics as given on coingecko.com.
     '''
-    
+
     # Get name of function for error messages (depends on inspect, sys)
     funcName = inspect.currentframe().f_code.co_name
     tokenDict = {}
-    
+
     # Scrape coingecko content for given token
     url = 'https://www.coingecko.com/en/coins/' + tokenStr
     userAgent = 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko)' + \
@@ -342,10 +402,10 @@ def get_token_metrics(token_str, logfile=None, waitAfter=3):
     req = urllib.request.Request(url, headers= {'User-Agent' : userAgent})
     html = urllib.request.urlopen(req)
     bs = BeautifulSoup(html.read(), 'html.parser')
-    
+
     # Load necessary html tag result sets
     noWrapTags = bs.findAll('span', {'class': 'no-wrap'})  # list of html tags
-    mt1Tags = bs.findAll('div', {'class': 'mt-1'}) 
+    mt1Tags = bs.findAll('div', {'class': 'mt-1'})
     tableRows = bs.findAll('tr')
 
     # Extract metrics that need html tag key attribute or other special treatment
@@ -361,8 +421,8 @@ def get_token_metrics(token_str, logfile=None, waitAfter=3):
             totalSupply = float(mt1Tags[6].get_text().split('/')[1].strip().replace(',',''))
         except ValueError:
             totalSupply = np.inf
-        
-    # Possibility: str-to-float conversion failed because it got None as argument 
+
+    # Possibility: str-to-float conversion failed because it got None as argument
     except TypeError:
         print(f"""
             Coingecko seems to have restructured their website.
@@ -370,7 +430,7 @@ def get_token_metrics(token_str, logfile=None, waitAfter=3):
             {manuallyScraped}
             Check {funcName}().
             """)
-    
+
     # Extract all other metrics from text and add all to the dict
     tokenDict['priceUSD'] = clean(noWrapTags[0].get_text())
     tokenDict['priceBTC'] = priceBTC
@@ -387,47 +447,50 @@ def get_token_metrics(token_str, logfile=None, waitAfter=3):
     tokenDict['ATH'] = clean(noWrapTags[12].get_text())
     tokenDict['ATL'] = clean(noWrapTags[13].get_text())
     tokenDict['symbol'] = noWrapTags[0].get('data-coin-symbol')
-    
+
     # Option: Write to logFile if any scraped metric except 'symbol' is not a number
     if logfile:
         allowedTypes = {int, float}
         filtered = {key: value for (key, value) in tokenDict.items() if key != 'symbol'}
-        
+
         for key, metric in filtered.items():
             if type(metric) not in allowedTypes:
-                message = f"Check {funcName}(): Scraped value for '{tokenStr}': '{key}' is '{metric}', which is not a number."
+                message = f"Check {funcName}(): Scraped value for \
+                    '{tokenStr}': '{key}' is '{metric}', which is not a number."
                 log(logfile, message)
-    
+
     # Wait for max {waitAfter} seconds before function can be called again (= scrape in a nice way)
     sleep(random.random() * waitAfter)
-    
+
     return tokenDict
 
-   
+
 # Creates/overwrites a csv file containing all loans not yet repaid
 def replace_active_loans(csv_active_loans, csv_hist_loans, var_order, logfile=None):
     '''
     Expects 2 csv files (daily active loans, historical loan data)
     and the var_order for printing to csv.
     '''
-    
+    global ALL_LOANS
+    global ALL_LOANS_DATA
+
     # Remove old version of csv_active_loans
     if os.path.isfile(csv_active_loans):
         os.remove(csv_active_loans)
-    
-    
+
+
     # Possibility: csv file exists. Discount addresses of repaid loans
     if os.path.isfile(csv_hist_loans):
         data = pd.read_csv(csv_hist_loans, index_col='id')
         is_repaid = data['loan_status'] != 0
-        
+
         repaid_loans = set(data[is_repaid]['loan_address'].tolist())
         active_loans = ALL_LOANS - repaid_loans
-    
+
         # Append active loan data to csv
         to_append = {loan: get_loan_data(loan) for loan in active_loans}
 
-        updateCSV(to_append, fileName=csv_active_loans, order=var_order, 
+        updateCSV(to_append, fileName=csv_active_loans, order=var_order,
                   verbose=False, logfile=None, sample=False)
 
 
@@ -435,18 +498,20 @@ def replace_active_loans(csv_active_loans, csv_hist_loans, var_order, logfile=No
     else:
         active_loans = {k: v for k, v in ALL_LOANS_DATA.items() \
                         if v['loan_status'] == 0}
-        
-        updateCSV(to_append, fileName=csv_active_loans, order=var_order, 
+
+        updateCSV(active_loans, fileName=csv_active_loans, order=var_order,
                   verbose=False, logfile=None, sample=False)
-        
+
     print(f'{len(active_loans)} loan(s) currently active...')
 
-    
+
 # Appends loans to csv if new or if repaid/liquidated since last data
-def update_hist_loans(csv_hist_loans, var_order, logfile=logfile):
+def update_hist_loans(csv_hist_loans, var_order, logfile=None):
     '''
     Update database with new loans or known loans with a changed status.
     '''
+    global ALL_LOANS
+    global ALL_LOANS_DATA
 
     # Possibility: database exists already. Append loans if new or status has changed
     if os.path.isfile(csv_hist_loans):
@@ -458,22 +523,22 @@ def update_hist_loans(csv_hist_loans, var_order, logfile=logfile):
         unknown_loans = ALL_LOANS - known_loans
 
         if unknown_loans:
-            
+
             fresh_loans = {loan: get_loan_data(loan) for loan in unknown_loans}
-            
-            updateCSV(fresh_loans, fileName=csv_hist_loans, order=var_order, 
+
+            updateCSV(fresh_loans, fileName=csv_hist_loans, order=var_order,
                       verbose=False, logfile=logfile)
-            
+
             message = f'{len(fresh_loans)} new loan(s) found and appended to data.'
             print(message)
             log(logfile, message)
-            
+
         else:
             print(f'No new loans today. Total loans still {len(ALL_LOANS)}.')
-            
+
 
         # Possibility: The status of a known loan has changed. Append to csv
-            # TODO: Filter by max loan time        
+            # TODO: Filter by max loan time
         data = pd.read_csv(csv_hist_loans)
         all_loans = pd.DataFrame(ALL_LOANS_DATA).T
 
@@ -484,7 +549,7 @@ def update_hist_loans(csv_hist_loans, var_order, logfile=logfile):
         keep_cols = all_loans.columns
         most_recent_loans = most_recent_loans.set_index('loan_address')[keep_cols]
         most_recent_loans = most_recent_loans.sort_index().sort_index(axis=1)
-        known_loans = data['loan_address'].unique().tolist()        
+        known_loans = data['loan_address'].unique().tolist()
         known_df = all_loans[all_loans.index.isin(known_loans)]
         known_df = known_df.sort_index().sort_index(axis=1)
 
@@ -492,18 +557,18 @@ def update_hist_loans(csv_hist_loans, var_order, logfile=logfile):
         status_changed = known_df['loan_status'] != most_recent_loans['loan_status']
         changed_loans = known_df[status_changed]
 
-        
+
         # Possibility: Loans with changed status found. Append to csv
         if len(changed_loans) != 0:
             to_append = changed_loans.to_dict(orient='index')
-        
+
             log(logfile, f'{len(changed_loans)} changed loan(s) appended.')
-            
-            updateCSV(to_append, fileName=csv_hist_loans, order=var_order, 
+
+            updateCSV(to_append, fileName=csv_hist_loans, order=var_order,
                       verbose=False, logfile=None, sample=False)
-            
+
         else:
-            
+
             print('No loans with a changed status since last time data was fetched.')
 
 
@@ -517,6 +582,3 @@ def update_hist_loans(csv_hist_loans, var_order, logfile=logfile):
         No previous database has been found. All {len(ALL_LOANS)} loans ever
         taken out on yield.credit have been stored in '{csv_hist_loans}'.
         ''')
-
-    
-        

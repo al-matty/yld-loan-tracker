@@ -8,19 +8,15 @@
 #    The script is intended to be scheduled daily using crontab for example.
 #############################################################################
 
-import os
-#from functions import *
-#import update_hist
-#from lookups import type_map, token_map
-from etherscan import Etherscan
-from web3.auto.infura import w3
-
-
 print('Script started...')
+
+import os
+from lookups import type_map, token_map
+from functions import log, get_abi, get_token_price
 
 
 # Specify paths to data files. Files will be created if not found.
-csv_active_loans = 'yield_active_loans.csv'     # replaced daily 
+csv_active_loans = 'yield_active_loans.csv'     # replaced daily
 csv_hist_loans = 'yield_hist_loan_activity.csv' # appended to if a loan status changes
 csv_daily_metrics = 'yield_daily_metrics.csv'   # appended to daily
 logfile = 'yield_logging.txt'                   # appended to daily
@@ -37,34 +33,65 @@ var_order = [
     ]
 
 
-# Initialize Etherscan API
-API_KEY = os.environ['ETHERSCAN_API_KEY']
-etherscan = Etherscan(API_KEY)
+#############################################################################
+#
+# Set global variables BTC_PRICE, ALL_LOANS, LOAN_FAC, ALL_LOANS_DATA
+#
+#############################################################################
 
-# Connect to ETH Node (Infura)
-eth = w3.eth
+
+# BTC_PRICE <- current BTC price used for BTC-denominated metrics
+try:
+    BTC_PRICE = get_token_price('bitcoin')
+except:
+    message = "Couldn't scrape BTC price from Coingecko."
+    print(message)
+    log(logfile, message)
+
+print(f'Successfully scraped current BTC price: {round(BTC_PRICE)} USD')
+print('Updating database now...')
+
 
 # Contract addresses
 loan_address = '0xbFE28f2d7ade88008af64764eA16053F705CF1f0'
 loan_fac_address = '0x49aF18b1ecA40Ef89cE7F605638cF675B70012A7'
 yld_token_address = '0xdcb01cc464238396e213a6fdd933e36796eaff9f'
-
 # Get contract ABIs
-abi_loan_fac = etherscan.get_contract_abi(address=loan_fac_address)
-abi_token = etherscan.get_contract_abi(address=yld_token_address)
-abi_loan = etherscan.get_contract_abi(address=loan_address)
 
-# Set some global variables
-LOAN_FAC = eth.contract(address=loan_fac_address, abi=abi_loan_fac).caller
-ALL_LOANS = get_all_loans(logfile=logfile)    # all loan addresses ever created
-ALL_LOANS_DATA = {loan: get_loan_data(loan) for loan in ALL_LOANS}
-DAILY_METRICS = {}
-#YLD_TOKEN = eth.contract(address=yld_token_address, abi=abi_token)#.caller
-try:
-    BTC_PRICE = get_token_price('bitcoin')
-except:
-    message = 'Couldn\'t scrape BTC price from Coingecko.'
-    print(message)
-    log(logfile, message)
+ABI_LOAN_FAC = get_abi(loan_fac_address)
+#abi_token = get_abi(yld_token_address)
+ABI_LOAN = get_abi(loan_address)
+
+from functions import *
 
 print('Successfully connected to APIs...')
+
+
+
+
+
+#############################################################################
+#
+# Update database with current loan information
+#
+#############################################################################
+
+
+# Get not yet repaid loans. Save to csv.
+print(f'Saving currently active loans to \'{csv_active_loans}\'...')
+replace_active_loans(csv_active_loans, csv_hist_loans, var_order, logfile)
+
+# Get loans that got defaulted/repaid since last update. Append to csv.
+print('Checking for loans with a recently changed status...')
+update_hist_loans(csv_hist_loans, var_order, logfile=logfile)
+
+
+
+# TODO: Get metrics for frontend
+
+# Scrapes data for tokens used in loans so far & saves to csv
+#update_daily_metrics(csv_daily_metrics)
+
+# Reads from csv
+#metrics_dict = get_metrics_for_frontend()
+# updates global TOKEN_METRICS_TODAY
