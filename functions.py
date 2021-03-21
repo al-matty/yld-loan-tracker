@@ -247,7 +247,6 @@ def log(logfile, _str):
     with open(logfile, 'a') as file:
         file.write(row)
 
-        
 
 # Helper function for Scrapes and returns price of 1 asset from coingecko
 def get_token_price(token_str):
@@ -405,4 +404,119 @@ def get_token_metrics(token_str, logfile=None, waitAfter=3):
     return tokenDict
 
    
+# Creates/overwrites a csv file containing all loans not yet repaid
+def replace_active_loans(csv_active_loans, csv_hist_loans, var_order, logfile=None):
+    '''
+    Expects 2 csv files (daily active loans, historical loan data)
+    and the var_order for printing to csv.
+    '''
+    
+    # Remove old version of csv_active_loans
+    if os.path.isfile(csv_active_loans):
+        os.remove(csv_active_loans)
+    
+    
+    # Possibility: csv file exists. Discount addresses of repaid loans
+    if os.path.isfile(csv_hist_loans):
+        data = pd.read_csv(csv_hist_loans, index_col='id')
+        is_repaid = data['loan_status'] != 0
+        
+        repaid_loans = set(data[is_repaid]['loan_address'].tolist())
+        active_loans = ALL_LOANS - repaid_loans
+    
+        # Append active loan data to csv
+        to_append = {loan: get_loan_data(loan) for loan in active_loans}
+
+        updateCSV(to_append, fileName=csv_active_loans, order=var_order, 
+                  verbose=False, logfile=None, sample=False)
+
+
+    # Possibility: No csv file. Save all active loans
+    else:
+        active_loans = {k: v for k, v in ALL_LOANS_DATA.items() \
+                        if v['loan_status'] == 0}
+        
+        updateCSV(to_append, fileName=csv_active_loans, order=var_order, 
+                  verbose=False, logfile=None, sample=False)
+        
+    print(f'{len(active_loans)} loan(s) currently active...')
+
+    
+# Appends loans to csv if new or if repaid/liquidated since last data
+def update_hist_loans(csv_hist_loans, var_order, logfile=logfile):
+    '''
+    Update database with new loans or known loans with a changed status.
+    '''
+
+    # Possibility: database exists already. Append loans if new or status has changed
+    if os.path.isfile(csv_hist_loans):
+        data = pd.read_csv(csv_hist_loans, index_col='id')
+
+
+        # Possibility: New loans created today. Append to csv
+        known_loans = set(data['loan_address'].tolist())
+        unknown_loans = ALL_LOANS - known_loans
+
+        if unknown_loans:
+            
+            fresh_loans = {loan: get_loan_data(loan) for loan in unknown_loans}
+            
+            updateCSV(fresh_loans, fileName=csv_hist_loans, order=var_order, 
+                      verbose=False, logfile=logfile)
+            
+            message = f'{len(fresh_loans)} new loan(s) found and appended to data.'
+            print(message)
+            log(logfile, message)
+            
+        else:
+            print(f'No new loans today. Total loans still {len(ALL_LOANS)}.')
+            
+
+        # Possibility: The status of a known loan has changed. Append to csv
+            # TODO: Filter by max loan time        
+        data = pd.read_csv(csv_hist_loans)
+        all_loans = pd.DataFrame(ALL_LOANS_DATA).T
+
+        # Get latest version of each loan from dataset for comparison
+        most_recent_loans = data.sort_values('time').groupby('loan_address').tail(1)
+
+        # Equalize shape and order differences
+        keep_cols = all_loans.columns
+        most_recent_loans = most_recent_loans.set_index('loan_address')[keep_cols]
+        most_recent_loans = most_recent_loans.sort_index().sort_index(axis=1)
+        known_loans = data['loan_address'].unique().tolist()        
+        known_df = all_loans[all_loans.index.isin(known_loans)]
+        known_df = known_df.sort_index().sort_index(axis=1)
+
+        # Keep only loans with a changed status
+        status_changed = known_df['loan_status'] != most_recent_loans['loan_status']
+        changed_loans = known_df[status_changed]
+
+        
+        # Possibility: Loans with changed status found. Append to csv
+        if len(changed_loans) != 0:
+            to_append = changed_loans.to_dict(orient='index')
+        
+            log(logfile, f'{len(changed_loans)} changed loan(s) appended.')
+            
+            updateCSV(to_append, fileName=csv_hist_loans, order=var_order, 
+                      verbose=False, logfile=None, sample=False)
+            
+        else:
+            
+            print('No loans with a changed status since last time data was fetched.')
+
+
+    # Possibility: No csv_hist_loans found. Create database with all loans
+    else:
+
+        updateCSV(ALL_LOANS_DATA, fileName=csv_hist_loans, order=var_order,
+                  verbose=False, logfile=logfile)
+
+        print(f'''
+        No previous database has been found. All {len(ALL_LOANS)} loans ever
+        taken out on yield.credit have been stored in '{csv_hist_loans}'.
+        ''')
+
+    
         
