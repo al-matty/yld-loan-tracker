@@ -1,3 +1,4 @@
+from lookups import *
 import os, inspect, sys
 import random
 import pandas as pd
@@ -9,7 +10,7 @@ from datetime import datetime
 from etherscan import Etherscan
 from web3.auto.infura import w3
 
-logfile = 'yield_logging.txt'
+logfile = 'yield_logging_TEST.txt'
 
 #############################################################################
 #
@@ -57,7 +58,6 @@ ABI_LOAN_FAC = get_abi(loan_fac_address)
 ABI_LOAN = get_abi(loan_address)
 
 
-
 # Appends a row (datetime + log message) to a logfile.
 def log(logfile, _str):
     '''
@@ -90,7 +90,6 @@ except:
 
 
 
-
 # Helper function: Takes token address and returns symbol as specified in token_map
 def get_token_symbol(token_address):
     try:
@@ -99,7 +98,7 @@ def get_token_symbol(token_address):
         print(
             f'''
             Couldn't find a symbol for token {token_address} in token_map.
-            Maybe it's only supported since today? I returned its address instead.
+            Maybe it's only recently been added? I returned its address instead.
             ''')
         return token_address
 
@@ -170,7 +169,9 @@ def get_loan_data(loan_address):
 
     return d
 
+
 ALL_LOANS_DATA = {loan: get_loan_data(loan) for loan in ALL_LOANS}
+
 
 # Helper function for appendToCsv(): Appends a new row to csv as specified in fileName
 def appendToCsv(fileName, varList, varNames, verbose=True):
@@ -384,6 +385,124 @@ def findCell(tableRows, rowKw, cellKw=None, getRawRow=False, stripToInt=True):
     return result
 
 
+# Helper function: Removes any '$', '%', and ',' from target string and converts to float
+def clean(string):
+    # Abort if scraped metric is empty or None
+    assert string not in {None, ''}, \
+        f"""
+        Coingecko seems to have restructured their website.
+        One of the metrics couldn't be scraped. Check {funcName}().
+        """
+    return float(string.replace(',','').replace('$','').replace('%',''))
+
+
+# Helper function: Takes token address and returns symbol as specified in token_map
+def get_token_symbol(token_address, logfile=daily_log):
+    try:
+        return token_map[token_address]['symbol']
+    except KeyError:
+        print(
+            f'''
+            Couldn't find a symbol for token {token_address} in token_map.
+            Maybe it's only supported since today? I returned its address instead.
+            ''')
+        return token_address
+
+# Helper function: Takes token address, returns coingecko location for scraping
+def get_token_str(token_address):
+    return token_map[token_address]['coingecko_str']
+
+
+# Helper function: Reverse lookup from token_map
+def get_address_by_symbol(symbol):
+    address = next(k for k, v in token_map.items() if v['symbol'] == symbol)
+    return address
+
+
+# Looks up decimals for ERC20 in token_map. Queries web3 if not in token_map
+def get_decimals_for_erc20(address, logfile=None):
+    '''
+    Takes ERC20 address string, gets abi, instantiates contract,
+    calls contract.functions.decimals(), returns value.
+    '''
+    # Possibility: Address in token_map. Read value from there.
+    if address in token_map:
+        result = token_map[address]['decimals']
+
+    # Possibility: Address not in token_map. Query web3.
+    else:
+        checksum_address = address
+        checksum_address = w3.toChecksumAddress(address)
+        abi_token = get_abi(checksum_version)
+        contract = instantiate_contract(checksum_version, abi_token)
+        result = contract.functions.decimals().call()
+
+        if logfile:
+            message = f'ERC20 address {address} not found in token_map. ' \
+                'Decimals had to be fetched from web3.'
+            log(logfile, message)
+
+    return result
+
+
+# Decodes an ERC20 amount based on its number of decimals
+def apply_decimals(amount, token_address=None, token_symbol=None, logfile=None):
+    '''
+    Takes ERC20 address string and looks up / fetches from web3
+    decimal information. Returns correct value based on decimals.
+    '''
+
+    if token_symbol:
+        token_address = get_address_by_symbol(symbol)
+
+    if token_address:
+        decimals = get_decimals_for_erc20(token_address, logfile=logfile)
+        DECIMALS = 10**decimals
+
+        return amount // DECIMALS
+
+    else:
+        print('Either a token adress or symbol string has to be specified.')
+
+
+# Returns the current supply for an ERC20 token (web3 query). Nan if weird.
+def get_supply_for_erc20(symbol=None, address=None):
+    '''
+    Queries web3 for totalSupply() of token, adjusts value using the
+    correct amount of decimals, returns current total supply.
+    Accepts a token's symbol (i.e. 'LINK') or its contract address.
+    '''
+    # contract.totalSupply() does not work for these tokens
+    not_possible = {'AMPL', 'AAVE', 'TUSD', 'USDC', 'USDT', 'WBTC', 'CRO'}
+    addies_not_possible = {get_address_by_symbol(s) for s in not_possible}
+
+    if symbol:
+        if symbol in not_possible:
+            return np.nan
+
+        address = get_address_by_symbol(symbol)
+
+    if address:
+        if address in addies_not_possible:
+            return np.nan
+
+        checksum_address = w3.toChecksumAddress(address)
+        abi_token = get_abi(checksum_address)
+        contract = instantiate_contract(checksum_address, abi_token)
+        raw_supply = contract.caller.totalSupply()
+        decoded = apply_decimals(raw_supply, address)
+
+        return decoded
+
+    else:
+        print('Either a token adress or symbol string has to be specified.')
+
+
+# Helper function: Returns unique, most recent rows for rows in df column
+def keep_unique_most_recent(df, col='loan_address'):
+    most_recent_loans = df.sort_values('time').groupby(col).tail(1)
+    return most_recent_loans
+
 # Scrapes coingecko and returns dict of various token metrics for 1 asset (calls findCell() for mc rank)
 def get_token_metrics(token_str, logfile=None, waitAfter=3):
     '''
@@ -396,7 +515,7 @@ def get_token_metrics(token_str, logfile=None, waitAfter=3):
     tokenDict = {}
 
     # Scrape coingecko content for given token
-    url = 'https://www.coingecko.com/en/coins/' + tokenStr
+    url = 'https://www.coingecko.com/en/coins/' + token_str
     userAgent = 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko)' + \
         ' Chrome/41.0.2228.0 Safari/537.36'
     req = urllib.request.Request(url, headers= {'User-Agent' : userAgent})
@@ -582,3 +701,26 @@ def update_hist_loans(csv_hist_loans, var_order, logfile=None):
         No previous database has been found. All {len(ALL_LOANS)} loans ever
         taken out on yield.credit have been stored in '{csv_hist_loans}'.
         ''')
+
+
+# Saves output of get_ts_metrics() to csv
+def update_ts_metrics(csv_daily_metrics, logfile=None):
+
+    # Append get_ts_metrics() to csv
+    pass
+
+
+# Helper function: Parses UTC time string from timestamp (int / str)
+def ts_to_utc_str(ts):
+    if isinstance(ts, str):
+        ts = int(ts)
+    utc = datetime.utcfromtimestamp(ts)
+    parsed = utc.strftime('%Y %b %d %H:%M') + ' UTC'
+    return parsed
+
+
+# Helper function: Converts duration in timestamp (seconds) to days
+def ts_duration_to_days(ts):
+    if isinstance(ts, str):
+        ts = int(ts)
+    return ts // (24 * 3600)
