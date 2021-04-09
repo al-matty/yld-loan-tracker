@@ -11,6 +11,7 @@ from etherscan import Etherscan
 from web3.auto.infura import w3
 
 logfile = 'yield_logging_TEST.txt'
+daily_log= 'yied_daily_log_TEST.txt'
 
 #############################################################################
 #
